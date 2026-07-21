@@ -3,9 +3,13 @@
 package e2e_test
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"sync"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -56,24 +60,21 @@ func doKubevirtRequest(method, path, payload string) (*http.Response, error) {
 
 // doRequestToURL performs HTTP request to a specific URL
 func doRequestToURL(url, method, payload string) (*http.Response, error) {
-	client := &http.Client{}
-	var body *http.Request
-	var err error
-
+	var bodyReader io.Reader
 	if payload != "" {
-		body, err = http.NewRequest(method, url, nil)
-		if err != nil {
-			return nil, err
-		}
-		body.Header.Set("Content-Type", "application/json")
-	} else {
-		body, err = http.NewRequest(method, url, nil)
-		if err != nil {
-			return nil, err
-		}
+		bodyReader = bytes.NewBufferString(payload)
 	}
 
-	return client.Do(body)
+	req, err := http.NewRequest(method, url, bodyReader)
+	if err != nil {
+		return nil, err
+	}
+
+	if payload != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	return (&http.Client{}).Do(req)
 }
 
 // VMSpec represents a minimal VM specification for testing
@@ -167,4 +168,97 @@ func getKubevirtProviderName() (string, error) {
 	}
 
 	return name, nil
+}
+
+// extractIDFromPath extracts the instance ID from a path like "/api/v1alpha1/vms/abc-123"
+func extractIDFromPath(path string) string {
+	// Find the last segment after the final slash
+	for i := len(path) - 1; i >= 0; i-- {
+		if path[i] == '/' {
+			return path[i+1:]
+		}
+	}
+	return path
+}
+
+// getVMFromCluster fetches VirtualMachine resource via kubectl/oc
+func getVMFromCluster(vmName, namespace string) (map[string]interface{}, error) {
+	// Try oc first, fall back to kubectl
+	cmd := exec.Command("oc", "get", "vm", vmName, "-n", namespace, "-o", "json")
+	out, err := cmd.Output()
+	if err != nil {
+		// Try kubectl as fallback
+		cmd = exec.Command("kubectl", "get", "vm", vmName, "-n", namespace, "-o", "json")
+		out, err = cmd.Output()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get vm %s: %w", vmName, err)
+		}
+	}
+
+	var vm map[string]interface{}
+	if err := json.Unmarshal(out, &vm); err != nil {
+		return nil, fmt.Errorf("failed to parse vm json: %w", err)
+	}
+	return vm, nil
+}
+
+// verifyDCMLabels checks VirtualMachine has required DCM labels
+func verifyDCMLabels(vmName, namespace, expectedInstanceID string) error {
+	vm, err := getVMFromCluster(vmName, namespace)
+	if err != nil {
+		return err
+	}
+
+	metadata, ok := vm["metadata"].(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("vm missing metadata")
+	}
+
+	labels, ok := metadata["labels"].(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("vm missing labels")
+	}
+
+	managedBy, _ := labels["dcm.project/managed-by"].(string)
+	if managedBy != "dcm" {
+		return fmt.Errorf("missing or incorrect dcm.project/managed-by label: got %q, want \"dcm\"", managedBy)
+	}
+
+	instanceID, _ := labels["dcm.project/instance-id"].(string)
+	if instanceID != expectedInstanceID {
+		return fmt.Errorf("instance-id mismatch: got %q, want %q", instanceID, expectedInstanceID)
+	}
+
+	return nil
+}
+
+// deleteVMFromCluster removes VirtualMachine directly via kubectl/oc
+func deleteVMFromCluster(vmName, namespace string) error {
+	cmd := exec.Command("oc", "delete", "vm", vmName, "-n", namespace, "--ignore-not-found=true")
+	if err := cmd.Run(); err != nil {
+		// Try kubectl as fallback
+		cmd = exec.Command("kubectl", "delete", "vm", vmName, "-n", namespace, "--ignore-not-found=true")
+		return cmd.Run()
+	}
+	return nil
+}
+
+// verifyVMDeleted confirms VirtualMachine no longer exists
+func verifyVMDeleted(vmName, namespace string) error {
+	cmd := exec.Command("oc", "get", "vm", vmName, "-n", namespace)
+	if err := cmd.Run(); err != nil {
+		return nil // VM doesn't exist (expected)
+	}
+	return fmt.Errorf("VM %s still exists in namespace %s", vmName, namespace)
+}
+
+// checkClusterAccess verifies kubectl/oc connectivity
+func checkClusterAccess() error {
+	cmd := exec.Command("oc", "cluster-info")
+	if err := cmd.Run(); err != nil {
+		// Try kubectl as fallback
+		cmd = exec.Command("kubectl", "cluster-info")
+		return cmd.Run()
+	}
+	return nil
 }

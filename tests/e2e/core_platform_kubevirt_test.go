@@ -18,7 +18,11 @@ var _ = Describe("Core Platform - KubeVirt Provider", Label("core", "platform", 
 
 		BeforeAll(func() {
 			requireKubevirtSP()
-			Skip("TODO: Implement full KubeVirt provisioning flow - requires deploy script integration")
+
+			// Verify cluster access (required for full E2E flow)
+			if err := checkClusterAccess(); err != nil {
+				Skip("kubectl/oc cluster access required for core platform test")
+			}
 		})
 
 		AfterAll(func() {
@@ -156,8 +160,6 @@ var _ = Describe("Core Platform - KubeVirt Provider", Label("core", "platform", 
 		})
 
 		It("creates a catalog item instance for VM", func() {
-			Skip("TODO: Complete catalog-item-instance creation and VM provisioning verification")
-
 			Expect(catalogItemID).NotTo(BeEmpty())
 
 			name := uniqueName("e2e-kubevirt-inst")
@@ -189,10 +191,9 @@ var _ = Describe("Core Platform - KubeVirt Provider", Label("core", "platform", 
 		})
 
 		It("VM reaches RUNNING status", func() {
-			Skip("TODO: Wait for VM to reach RUNNING status")
-
 			Expect(resourceID).NotTo(BeEmpty())
 
+			// VMs take longer to provision than containers - increase timeout
 			Eventually(func() string {
 				resp, err := doRequest(http.MethodGet, "/service-type-instances/"+resourceID, "")
 				if err != nil {
@@ -207,13 +208,13 @@ var _ = Describe("Core Platform - KubeVirt Provider", Label("core", "platform", 
 				var body map[string]interface{}
 				decodeJSON(resp, &body)
 				status, _ := body["status"].(string)
+				GinkgoWriter.Printf("VM status: %s\n", status)
 				return status
-			}).WithTimeout(300 * time.Second).WithPolling(5 * time.Second).Should(Equal("RUNNING"),
+			}).WithTimeout(600 * time.Second).WithPolling(10 * time.Second).Should(Equal("RUNNING"),
 				"VM should reach RUNNING status")
 		})
 
 		It("has correct provider assignment", func() {
-			Skip("TODO: Verify provider assignment")
 
 			Expect(resourceID).NotTo(BeEmpty())
 
