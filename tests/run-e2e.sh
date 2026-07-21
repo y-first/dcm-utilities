@@ -57,6 +57,7 @@ Service provider flags (forwarded to deploy-dcm.sh):
 Environment variables:
   DCM_CONTAINER_SP_URL     Container SP direct URL (default: http://localhost:8082/api/v1alpha1)
   DCM_ACM_CLUSTER_SP_URL   ACM Cluster SP direct URL (default: http://localhost:8083/api/v1alpha1)
+  DCM_KUBEVIRT_SP_URL      KubeVirt SP direct URL (default: http://localhost:8081/api/v1alpha1)
   DCM_NATS_URL             NATS URL for event tests (default: nats://localhost:4222)
   DCM_GATEWAY_URL          Control plane API URL (default: http://localhost:8080/api/v1alpha1)
 
@@ -158,6 +159,7 @@ JUNIT_REPORT=""
 DEPLOY_ARGS=()
 ENABLE_CONTAINER_SP=false
 ENABLE_ACM_CLUSTER_SP=false
+ENABLE_KUBEVIRT_SP=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -198,6 +200,7 @@ while [[ $# -gt 0 ]]; do
         --all-service-providers)
             ENABLE_CONTAINER_SP=true
             ENABLE_ACM_CLUSTER_SP=true
+            ENABLE_KUBEVIRT_SP=true
             DEPLOY_ARGS+=("$1")
             shift ;;
         --acm-cluster-service-provider)
@@ -205,6 +208,7 @@ while [[ $# -gt 0 ]]; do
             DEPLOY_ARGS+=("$1")
             shift ;;
         --kubevirt-service-provider)
+            ENABLE_KUBEVIRT_SP=true
             DEPLOY_ARGS+=("$1")
             shift ;;
         --deploy-acm|--deploy-mce)
@@ -266,6 +270,10 @@ fi
 if [[ "${ENABLE_ACM_CLUSTER_SP}" == "true" ]]; then
     export DCM_ACM_CLUSTER_SP_URL="${DCM_ACM_CLUSTER_SP_URL:-http://localhost:8083/api/v1alpha1}"
     info "DCM_ACM_CLUSTER_SP_URL=${DCM_ACM_CLUSTER_SP_URL}"
+fi
+if [[ "${ENABLE_KUBEVIRT_SP}" == "true" ]]; then
+    export DCM_KUBEVIRT_SP_URL="${DCM_KUBEVIRT_SP_URL:-http://localhost:8081/api/v1alpha1}"
+    info "DCM_KUBEVIRT_SP_URL=${DCM_KUBEVIRT_SP_URL}"
 fi
 
 # Build ginkgo arguments.
