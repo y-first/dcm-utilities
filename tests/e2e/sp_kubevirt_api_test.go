@@ -52,13 +52,16 @@ var _ = Describe("KubeVirt Service Provider API", Label("sp", "kubevirt"), func(
 			}
 		})
 
-		It("creates a VM with valid spec", func() {
-			Skip("TODO: Implement CreateVM test - requires cluster access and proper payload format")
+		It("creates a VM with valid spec [TC-06]", func() {
+			// Check cluster access first
+			if err := checkClusterAccess(); err != nil {
+				Skip("Cluster access required for VM creation test")
+			}
 
 			vmName := uniqueName("e2e-kubevirt-vm")
 			spec := newTestVMSpec(vmName)
 
-			payload, err := json.Marshal(spec)
+			payload, err := json.Marshal(map[string]interface{}{"spec": spec})
 			Expect(err).NotTo(HaveOccurred())
 
 			resp, err := doKubevirtRequest(http.MethodPost, "/vms", string(payload))
@@ -76,13 +79,13 @@ var _ = Describe("KubeVirt Service Provider API", Label("sp", "kubevirt"), func(
 			Expect(ok).To(BeTrue())
 			Expect(path).To(ContainSubstring("/vms/"))
 
-			// TODO: Extract actual ID from path
-			// vmID = extractIDFromPath(path)
+			vmID = extractIDFromPath(path)
+			Expect(vmID).NotTo(BeEmpty())
+
+			GinkgoWriter.Printf("Created VM with ID: %s\n", vmID)
 		})
 
-		It("lists VMs", func() {
-			Skip("TODO: Implement ListVMs test - requires cluster access")
-
+		It("lists VMs [TC-15]", func() {
 			resp, err := doKubevirtRequest(http.MethodGet, "/vms", "")
 			Expect(err).NotTo(HaveOccurred())
 			defer resp.Body.Close()
@@ -96,14 +99,54 @@ var _ = Describe("KubeVirt Service Provider API", Label("sp", "kubevirt"), func(
 			vms, ok := body["vms"].([]interface{})
 			Expect(ok).To(BeTrue())
 			Expect(vms).NotTo(BeNil())
+
+			GinkgoWriter.Printf("Listed %d VMs\n", len(vms))
 		})
 
-		It("gets a specific VM", func() {
-			Skip("TODO: Implement GetVM test - requires creating a VM first")
+		It("gets a specific VM [TC-12]", func() {
+			if vmID == "" {
+				Skip("No VM created to test GET operation")
+			}
+
+			resp, err := doKubevirtRequest(http.MethodGet, "/vms/"+vmID, "")
+			Expect(err).NotTo(HaveOccurred())
+			defer resp.Body.Close()
+
+			Expect(resp.StatusCode).To(Equal(http.StatusOK))
+
+			var body map[string]interface{}
+			err = json.NewDecoder(resp.Body).Decode(&body)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(body).To(HaveKey("spec"))
+			Expect(body).To(HaveKey("path"))
+
+			path, _ := body["path"].(string)
+			Expect(path).To(ContainSubstring(vmID))
+
+			GinkgoWriter.Printf("Retrieved VM: %s\n", vmID)
 		})
 
-		It("deletes a VM", func() {
-			Skip("TODO: Implement DeleteVM test - requires creating a VM first")
+		It("deletes a VM [TC-18]", func() {
+			if vmID == "" {
+				Skip("No VM created to test DELETE operation")
+			}
+
+			resp, err := doKubevirtRequest(http.MethodDelete, "/vms/"+vmID, "")
+			Expect(err).NotTo(HaveOccurred())
+			defer resp.Body.Close()
+
+			Expect(resp.StatusCode).To(Equal(http.StatusNoContent))
+
+			// Verify VM no longer exists
+			resp, err = doKubevirtRequest(http.MethodGet, "/vms/"+vmID, "")
+			Expect(err).NotTo(HaveOccurred())
+			defer resp.Body.Close()
+
+			Expect(resp.StatusCode).To(Equal(http.StatusNotFound))
+
+			GinkgoWriter.Printf("Deleted VM: %s\n", vmID)
+			vmID = "" // Clear the ID so cleanup doesn't try again
 		})
 
 		It("returns 404 for non-existent VM", func() {
