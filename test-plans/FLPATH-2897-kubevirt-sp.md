@@ -463,6 +463,30 @@ Key test files:
 - **Resources:** Sufficient CPU/memory for test VMs (minimal specs acceptable)
 - **Permissions:** Service account with VirtualMachine CRUD permissions
 
+### Automated Prerequisite Checks
+
+Tests automatically verify prerequisites and skip gracefully if not met:
+
+| Check | Function | Tests Affected | Skip Message |
+|-------|----------|----------------|--------------|
+| **Cluster Access** | `checkClusterAccess()` | All cluster-dependent tests | "kubectl/oc cluster access required" |
+| **StorageClass Availability** | `checkStorageClass()` | VM creation tests (TC-06, TC-23) | "At least one StorageClass required" |
+| **KubeVirt SP Reachable** | `requireKubevirtSP()` | All KubeVirt SP tests | "KubeVirt SP not available" |
+| **NATS Reachable** | `requireNATS()` | Status monitoring tests (TC-21, TC-22) | "NATS server not available" |
+
+**Storage Class Check Details:**
+- Verifies at least one StorageClass exists in cluster
+- Uses `kubectl get storageclass -o json` or `oc get storageclass -o json`
+- Logs count of available storage classes
+- Helper function `getDefaultStorageClass()` identifies default class
+- Tests skip with clear message if no storage classes found
+
+**Benefits:**
+- Tests don't fail due to missing prerequisites
+- Clear skip messages guide environment setup
+- Supports both OpenShift (`oc`) and Kubernetes (`kubectl`)
+- Prerequisite validation happens in `BeforeEach` or `BeforeAll` hooks
+
 ## Success Criteria
 
 - All TC-01 through TC-33 pass against a live KubeVirt cluster

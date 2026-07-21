@@ -262,3 +262,79 @@ func checkClusterAccess() error {
 	}
 	return nil
 }
+
+// checkStorageClass verifies at least one StorageClass is available
+func checkStorageClass() error {
+	cmd := exec.Command("oc", "get", "storageclass", "-o", "json")
+	out, err := cmd.Output()
+	if err != nil {
+		// Try kubectl as fallback
+		cmd = exec.Command("kubectl", "get", "storageclass", "-o", "json")
+		out, err = cmd.Output()
+		if err != nil {
+			return fmt.Errorf("failed to get storage classes: %w", err)
+		}
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(out, &result); err != nil {
+		return fmt.Errorf("failed to parse storage class json: %w", err)
+	}
+
+	items, ok := result["items"].([]interface{})
+	if !ok || len(items) == 0 {
+		return fmt.Errorf("no storage classes available in cluster")
+	}
+
+	GinkgoWriter.Printf("Found %d storage class(es) available\n", len(items))
+	return nil
+}
+
+// getDefaultStorageClass returns the name of the default storage class, or empty if none
+func getDefaultStorageClass() string {
+	cmd := exec.Command("oc", "get", "storageclass", "-o", "json")
+	out, err := cmd.Output()
+	if err != nil {
+		cmd = exec.Command("kubectl", "get", "storageclass", "-o", "json")
+		out, err = cmd.Output()
+		if err != nil {
+			return ""
+		}
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(out, &result); err != nil {
+		return ""
+	}
+
+	items, ok := result["items"].([]interface{})
+	if !ok {
+		return ""
+	}
+
+	// Find default storage class
+	for _, item := range items {
+		sc, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		metadata, ok := sc["metadata"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		annotations, ok := metadata["annotations"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		// Check for default annotation
+		if isDefault, _ := annotations["storageclass.kubernetes.io/is-default-class"].(string); isDefault == "true" {
+			name, _ := metadata["name"].(string)
+			return name
+		}
+	}
+
+	return ""
+}

@@ -23,6 +23,11 @@ var _ = Describe("Core Platform - KubeVirt Provider", Label("core", "platform", 
 			if err := checkClusterAccess(); err != nil {
 				Skip("kubectl/oc cluster access required for core platform test")
 			}
+
+			// Verify storage class availability (required for VM provisioning)
+			if err := checkStorageClass(); err != nil {
+				Skip("At least one StorageClass required for VM provisioning: " + err.Error())
+			}
 		})
 
 		AfterAll(func() {
