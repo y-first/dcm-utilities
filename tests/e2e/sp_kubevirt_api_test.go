@@ -58,6 +58,11 @@ var _ = Describe("KubeVirt Service Provider API", Label("sp", "kubevirt"), func(
 				Skip("Cluster access required for VM creation test")
 			}
 
+			// Check storage class availability
+			if err := checkStorageClass(); err != nil {
+				Skip("At least one StorageClass required for VM creation: " + err.Error())
+			}
+
 			vmName := uniqueName("e2e-kubevirt-vm")
 			spec := newTestVMSpec(vmName)
 
