@@ -1,4 +1,4 @@
-.PHONY: help e2e-up test-e2e test-smoke test-cli test-sp test-acm-sp test-core test-rehydration test-rehydration-safe test-rehydration-cli e2e-down test-e2e-full download-cli cli-version lint
+.PHONY: help e2e-up test-e2e test-smoke test-cli test-sp test-acm-sp test-kubevirt-sp test-core test-rehydration test-rehydration-safe test-rehydration-cli e2e-down test-e2e-full download-cli cli-version lint
 
 # Set JUNIT_REPORT to a filename to produce JUnit XML output.
 # Example: make test-e2e JUNIT_REPORT=results.xml
@@ -29,6 +29,9 @@ test-sp: ## Run all service provider tests (SPs must be deployed with ports publ
 
 test-acm-sp: ## Run ACM cluster SP tests only
 	cd tests/e2e && $(GINKGO_BASE) --label-filter=acm-cluster .
+
+test-kubevirt-sp: ## Run KubeVirt SP tests only (KubeVirt cluster required)
+	cd tests/e2e && $(GINKGO_BASE) --label-filter=kubevirt .
 
 test-core: ## Run core platform tests (full control plane provisioning flow)
 	cd tests/e2e && $(GINKGO_BASE) --label-filter=core .
