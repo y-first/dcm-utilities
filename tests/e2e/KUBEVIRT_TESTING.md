@@ -13,8 +13,9 @@ The KubeVirt SP test suite validates VM lifecycle management through the DCM pla
 
 | File | Purpose | Labels |
 |------|---------|--------|
-| `sp_kubevirt_helpers_test.go` | Helper functions, VM spec builders, provider discovery | — |
+| `sp_kubevirt_helpers_test.go` | Helper functions, VM spec builders, provider discovery, `requireNATS` | — |
 | `sp_kubevirt_api_test.go` | Direct KubeVirt SP API tests (health, CRUD) | `sp`, `kubevirt` |
+| `sp_kubevirt_status_test.go` | NATS status event verification | `sp`, `kubevirt`, `nats` |
 | `core_platform_kubevirt_test.go` | End-to-end VM provisioning via DCM catalog | `core`, `platform`, `kubevirt` |
 
 ## Prerequisites
@@ -98,38 +99,39 @@ See [test-plans/FLPATH-2897-kubevirt-sp.md](../../test-plans/FLPATH-2897-kubevir
 
 - [x] Test plan document (FLPATH-2897)
 - [x] Helper functions and VM spec builders
+- [x] Deploy script integration (`providers/kubevirt.conf`, `--kubevirt-service-provider`)
+- [x] Compose override publishing SP on host port 8081 (`tests/compose-kubevirt-sp.yaml`)
+- [x] Namespace export aligned with control-plane (`KUBERNETES_NAMESPACE`)
 - [x] Health endpoint test (TC-04)
-- [x] 404 handling test
+- [x] Create / List / Get / Delete VM tests (TC-06, TC-15, TC-12, TC-18) — Ordered
+- [x] 404 handling test (TC-13)
+- [x] Full catalog-to-VM provisioning flow (TC-23)
+- [x] VM status / NATS monitoring tests (TC-21, TC-22) with `requireNATS()`
+- [x] StorageClass prerequisite checks
+- [x] `make test-kubevirt-sp` target
 
 ### TODO
 
-- [ ] Deploy script integration (`--kubevirt-service-provider` flag)
-- [ ] Compose override file for KubeVirt SP
-- [ ] Provider registry configuration
-- [ ] CreateVM test implementation (TC-06)
-- [ ] GetVM test implementation (TC-12)
-- [ ] ListVMs test implementation (TC-15)
-- [ ] DeleteVM test implementation (TC-18)
-- [ ] Full catalog-to-VM provisioning flow (TC-23)
-- [ ] VM status monitoring tests (TC-21, TC-22)
-- [ ] Label verification tests (TC-26, TC-27)
+- [ ] Label verification assertions in CRUD tests (TC-26, TC-27) — helpers exist
+- [ ] Full delete lifecycle via catalog (TC-24 remaining steps)
 - [ ] Validation tests (TC-09, TC-25, TC-29)
+- [ ] Remaining plan cases (registration retries, concurrency, storage-class errors, etc.)
 
 ## Next Steps
 
-1. **Deploy Script Integration**
-   - Add `providers/kubevirt.conf` provider registry entry
-   - Create `compose-kubevirt-sp.yaml` compose override
-   - Add validation hook for CNV/KubeVirt prerequisites
+1. **Run against a CNV cluster**
+   ```bash
+   ./scripts/deploy-dcm.sh \
+     --kubevirt-service-provider \
+     --kubeconfig /path/to/kubeconfig \
+     --kubevirt-vm-namespace vms
+   make test-kubevirt-sp
+   ```
 
-2. **Complete Test Implementation**
-   - Implement skipped test cases in `sp_kubevirt_api_test.go`
-   - Complete catalog-item-instance flow in `core_platform_kubevirt_test.go`
-   - Add VM status polling and verification
+2. **Complete remaining test cases** from [FLPATH-2897](../../test-plans/FLPATH-2897-kubevirt-sp.md)
 
 3. **CI Integration**
-   - Add `test-kubevirt` target to Makefile
-   - Update `.github/workflows/validate-tests.yaml`
+   - Update `.github/workflows/validate-tests.yaml` when a CNV-capable runner is available
    - Document cluster setup requirements for CI
 
 ## Related Documentation

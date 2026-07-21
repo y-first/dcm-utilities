@@ -11,7 +11,10 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"time"
 
+	"github.com/google/uuid"
+	"github.com/nats-io/nats.go"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
@@ -30,8 +33,8 @@ func initKubevirtSP() {
 			kubevirtSPURL = "http://localhost:8081/api/v1alpha1"
 		}
 
-		// Test connectivity
-		resp, err := http.Get(kubevirtSPURL + "/health")
+		// Health lives under /vms/health (same pattern as container/acm SPs)
+		resp, err := http.Get(kubevirtSPURL + "/vms/health")
 		if err != nil || resp.StatusCode != http.StatusOK {
 			GinkgoWriter.Printf("KubeVirt SP not reachable at %s (tests will skip)\n", kubevirtSPURL)
 			kubevirtSPSkipped = true
@@ -49,13 +52,34 @@ func initKubevirtSP() {
 func requireKubevirtSP() {
 	initKubevirtSP()
 	if kubevirtSPSkipped {
-		Skip("KubeVirt SP not available")
+		Skip("KubeVirt SP not available (deploy with --kubevirt-service-provider; port 8081 published via compose-kubevirt-sp.yaml)")
 	}
+}
+
+// requireNATS skips the test if NATS is not reachable at DCM_NATS_URL.
+func requireNATS() {
+	url := os.Getenv("DCM_NATS_URL")
+	if url == "" {
+		url = "nats://localhost:4222"
+	}
+
+	nc, err := nats.Connect(url, nats.Timeout(2*time.Second), nats.Name("dcm-e2e-kubevirt-nats-check"))
+	if err != nil {
+		Skip(fmt.Sprintf("NATS server not available at %s: %v", url, err))
+	}
+	nc.Close()
 }
 
 // doKubevirtRequest performs HTTP request against the KubeVirt SP
 func doKubevirtRequest(method, path, payload string) (*http.Response, error) {
 	return doRequestToURL(kubevirtSPURL+path, method, payload)
+}
+
+// createVMPath returns POST /vms?id=<uuid>. The current kubevirt SP panics when
+// the optional id query param is omitted (*request.Params.Id nil deref).
+func createVMPath() (path string, id string) {
+	id = uuid.NewString()
+	return "/vms?id=" + id, id
 }
 
 // doRequestToURL performs HTTP request to a specific URL
@@ -126,13 +150,14 @@ func newTestVMSpec(name string) VMSpec {
 			Count: 1,
 		},
 		Memory: VMMemory{
-			Size: "1Gi",
+			// OpenAPI requires ^[0-9]+(MB|GB|TB)$ — not Kubernetes units like Gi
+			Size: "1GB",
 		},
 		Storage: VMStorage{
 			Disks: []VMDisk{
 				{
 					Name:     "boot",
-					Capacity: "10Gi",
+					Capacity: "10GB",
 				},
 			},
 		},

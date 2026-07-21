@@ -1,0 +1,8 @@
+# Compose override for E2E testing: publishes the KubeVirt SP port to the host.
+# Injected automatically by deploy-dcm.sh via the provider registry
+# (providers/kubevirt.conf → COMPOSE_OVERRIDE).
+
+services:
+  kubevirt-service-provider:
+    ports:
+      - "8081:8081"

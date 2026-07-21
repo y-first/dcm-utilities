@@ -114,9 +114,9 @@ var _ = Describe("Core Platform - KubeVirt Provider", Label("core", "platform", 
 						{"path": "metadata.name", "display_name": "VM Name", "editable": true, "default": %q},
 						{"path": "guest_os.type", "display_name": "Guest OS", "editable": true, "default": "linux"},
 						{"path": "vcpu.count", "editable": false, "default": 1},
-						{"path": "memory.size", "editable": false, "default": "1Gi"},
+						{"path": "memory.size", "editable": false, "default": "1GB"},
 						{"path": "storage.disks[0].name", "editable": false, "default": "boot"},
-						{"path": "storage.disks[0].capacity", "editable": false, "default": "10Gi"}
+						{"path": "storage.disks[0].capacity", "editable": false, "default": "10GB"}
 					]
 				}
 			}`, name, name)
