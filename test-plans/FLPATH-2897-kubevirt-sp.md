@@ -199,11 +199,20 @@ Key test coverage in repo (no need to duplicate at E2E):
 
 #### TC-17: List skips VMs that fail conversion
 
+**Priority:** P2 (edge case)
+
 | Step | Action | Expected |
 |------|--------|----------|
-| 1 | Create VM with malformed spec (manually on cluster) but with DCM labels | — |
-| 2 | GET `/api/v1alpha1/vms` | HTTP 200, malformed VM skipped (not in list) |
-| 3 | Check logs | Warning logged about conversion failure |
+| 1a | Create VM with DCM labels but missing `.spec.template` | — |
+| 1b | Create VM with unparseable memory (`memory: "invalid"`) | — |
+| 1c | Create VM with `dcm.project/instance-id` but no `dcm.project/managed-by` | — |
+| 2 | GET `/api/v1alpha1/vms` | HTTP 200, malformed VMs skipped (not in list) |
+| 3 | Check logs | Warning logged about each conversion failure |
+
+**Concrete malformed scenarios:**
+- Missing `.spec.template` (structural)
+- Invalid memory format (validation)
+- Incomplete DCM labels (label mismatch)
 
 ### Delete VM
 
@@ -244,12 +253,33 @@ Key test coverage in repo (no need to duplicate at E2E):
 
 #### TC-22: Status events published to NATS
 
+**Priority:** P0 (critical for NATS integration validation)
+
 | Step | Action | Expected |
 |------|--------|----------|
 | 1 | Subscribe to NATS subject for VM status | — |
 | 2 | Create a VM | — |
 | 3 | Monitor NATS messages | Status events published as VM transitions states |
-| 4 | Check event payload | Contains instance ID, status, timestamp |
+| 4 | Validate CloudEvent schema | Contains all required fields (see below) |
+| 5 | Verify event ordering | PENDING before RUNNING |
+| 6 | Count events | 2-4 events expected for typical VM creation |
+
+**CloudEvent Schema Requirements:**
+- `specversion` (string): CloudEvents version
+- `type` (string): Event type identifier
+- `source` (string): Event source
+- `data.instance_id` (string): Matches VM instance ID
+- `data.status` (string enum): PENDING, PROVISIONING, RUNNING, etc.
+- `data.timestamp` (ISO 8601): Event timestamp
+- `data.service_type` (string): Equals "vm"
+
+**Delivery Semantics:** At-least-once (events may duplicate, ordering preserved per instance)
+
+**Typical Event Flow:** VM creation generates 2-4 events:
+1. PENDING (VM resource created)
+2. PROVISIONING (VMI being scheduled)
+3. RUNNING (VMI started, guest OS booting)
+4. RUNNING (periodic heartbeat - optional)
 
 ### E2E via DCM Gateway
 
@@ -309,10 +339,22 @@ Key test coverage in repo (no need to duplicate at E2E):
 
 #### TC-28: Client handles KubeVirt API errors
 
-| Step | Action | Expected |
-|------|--------|----------|
-| 1 | POST VM with spec requiring unavailable storage class | Appropriate error returned |
-| 2 | Check response | Error message indicates storage issue |
+**Priority:** P2 (improves error handling coverage)
+
+| Scenario | Action | Expected |
+|----------|--------|----------|
+| 28a: Storage class | POST VM with non-existent storage class | HTTP 400/500, error mentions storage class |
+| 28b: Resource quota | POST VM when namespace quota exceeded (CPU/memory) | HTTP 400/500, error mentions quota/resources |
+| 28c: Invalid resources | POST VM with invalid CPU/memory combination rejected by KubeVirt admission | HTTP 400, error from KubeVirt admission webhook |
+| 28d: Image pull failure | POST VM using containerDisk with unreachable image | VM created but status shows ImagePullBackOff |
+| 28e: Insufficient capacity | POST VM when cluster lacks capacity for scheduling | VM created but status shows scheduling failure |
+
+**Specific Error Scenarios:**
+1. **Unavailable storage class:** `storageClassName: "does-not-exist"`
+2. **Quota exceeded:** Namespace with `ResourceQuota` limiting memory
+3. **Invalid admission:** Memory < 64Mi (below KubeVirt minimum)
+4. **Image pull:** `image: "quay.io/invalid/missing:latest"`
+5. **Capacity:** Request more CPU than available nodes
 
 #### TC-29: Mapper conversion errors are handled
 
@@ -331,6 +373,51 @@ Key test coverage in repo (no need to duplicate at E2E):
 | 2 | Create VM via API | — |
 | 3 | Check cluster | VirtualMachine in `dcm-vms` namespace |
 | 4 | VMs in other namespaces | Not returned by List operation |
+
+### Concurrency & Performance
+
+#### TC-31: Concurrent VM creation
+
+**Priority:** P1 (common production scenario)
+
+| Step | Action | Expected |
+|------|--------|----------|
+| 1 | Create 5 VMs in parallel with different instance IDs | — |
+| 2 | Check all responses | All return HTTP 201 |
+| 3 | Verify on cluster | All 5 VMs created with correct DCM labels |
+| 4 | Check for label conflicts | No duplicate instance-id labels |
+
+**Rationale:** KubeVirt admission controllers and DCM label uniqueness need validation under concurrent load.
+
+### VM Lifecycle State Changes
+
+#### TC-32: VM state transitions beyond create/delete
+
+**Priority:** P1 (validates monitoring resilience)
+
+| Step | Action | Expected |
+|------|--------|----------|
+| 1 | Create VM, wait for RUNNING status | — |
+| 2 | Stop VM via KubeVirt API (not DCM) | VM enters Stopped phase |
+| 3 | Verify NATS event published | Status event reflects "Stopped" |
+| 4 | Start VM via KubeVirt API | VM returns to RUNNING |
+| 5 | Verify DCM API reflects state | GET /vms/{id} shows RUNNING |
+
+**Rationale:** Real VMs get stopped, restarted, migrated. Need to verify monitoring tracks external state changes.
+
+### Storage Class Handling
+
+#### TC-33: Storage class selection and error handling
+
+**Priority:** P2 (common production configuration)
+
+| Step | Action | Expected |
+|------|--------|----------|
+| 1 | Create VM when multiple storage classes exist | VM uses default or specified class |
+| 2 | Create VM requesting non-existent storage class | HTTP 400 or 500 with descriptive error |
+| 3 | Verify PVC provisioned with correct storage class | `kubectl get pvc` shows expected class |
+
+**Rationale:** Validates SP behavior with multiple/missing storage classes, not just "at least one exists."
 
 ## Upstream Test Coverage (in repo)
 
@@ -378,9 +465,33 @@ Key test files:
 
 ## Success Criteria
 
-- All TC-01 through TC-30 pass against a live KubeVirt cluster
+- All TC-01 through TC-33 pass against a live KubeVirt cluster
 - VM creation results in actual VirtualMachine on cluster
 - VM lifecycle (create → running → delete) completes successfully
 - Status monitoring reflects real VMI phase changes
 - DCM end-to-end flow provisions VMs through catalog/policy/placement
+- Concurrent VM creation succeeds without label conflicts
+- NATS events conform to CloudEvent schema and ordering requirements
+- Storage class selection and error handling work correctly
 - No regression in existing container SP or ACM cluster SP tests
+
+## Test Case Summary
+
+| Category | Test Cases | Priority |
+|----------|------------|----------|
+| Registration | TC-01 to TC-03 | P1 |
+| Health Endpoint | TC-04 to TC-05 | P1 |
+| Create VM | TC-06 to TC-11 | P0 |
+| Get VM | TC-12 to TC-14 | P0 |
+| List VMs | TC-15 to TC-17 | P1 |
+| Delete VM | TC-18 to TC-20 | P0 |
+| Status Monitoring | TC-21 to TC-22 | P0 |
+| E2E via Gateway | TC-23 to TC-24 | P1 |
+| OpenAPI Validation | TC-25 | P1 |
+| Label Management | TC-26 to TC-27 | P1 |
+| Error Handling | TC-28 to TC-29 | P2 |
+| Namespace Isolation | TC-30 | P1 |
+| Concurrency | TC-31 | P1 |
+| VM Lifecycle States | TC-32 | P1 |
+| Storage Class | TC-33 | P2 |
+| **Total** | **33 test cases** | — |
