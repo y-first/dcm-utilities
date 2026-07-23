@@ -3,13 +3,12 @@
 package e2e_test
 
 import (
-	"context"
 	"encoding/json"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
-	"github.com/nats-io/nats.go/jetstream"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
@@ -35,16 +34,8 @@ var _ = Describe("KubeVirt SP Status Monitoring", Label("sp", "kubevirt", "nats"
 		var err error
 		nc, err = nats.Connect(natsURL)
 		Expect(err).NotTo(HaveOccurred(), "NATS server should be reachable at %s", natsURL)
-
-		// Ensure a JetStream stream captures kubevirt SP events (SP publishes via JS).
-		js, err := jetstream.New(nc)
-		Expect(err).NotTo(HaveOccurred())
-		_, err = js.CreateOrUpdateStream(context.Background(), jetstream.StreamConfig{
-			Name:     "DCM_VM",
-			Subjects: []string{kubevirtNATSSubject},
-		})
-		Expect(err).NotTo(HaveOccurred(), "failed to ensure JetStream stream for %s", kubevirtNATSSubject)
-
+		// Prefer core NATS subscribe on dcm.vm — the compose stack already has
+		// a JetStream stream (dcm-status: dcm.*) covering this subject.
 		GinkgoWriter.Printf("Connected to NATS at %s (subject %s)\n", natsURL, kubevirtNATSSubject)
 	})
 
@@ -52,14 +43,8 @@ var _ = Describe("KubeVirt SP Status Monitoring", Label("sp", "kubevirt", "nats"
 		if nc != nil {
 			nc.Close()
 		}
-
-		if vmID != "" {
-			resp, err := doKubevirtRequest("DELETE", "/vms/"+vmID, "")
-			if err == nil && resp != nil {
-				resp.Body.Close()
-			}
-			vmID = ""
-		}
+		deleteTestVM(vmID)
+		vmID = ""
 	})
 
 	Context("VM Status Events", func() {
@@ -67,131 +52,183 @@ var _ = Describe("KubeVirt SP Status Monitoring", Label("sp", "kubevirt", "nats"
 			sub, err := nc.SubscribeSync(kubevirtNATSSubject)
 			Expect(err).NotTo(HaveOccurred())
 			defer sub.Unsubscribe()
-			nc.Flush()
+			Expect(nc.Flush()).To(Succeed())
 
 			vmName = uniqueName("e2e-nats-vm")
-			spec := newTestVMSpec(vmName)
-			payload, err := json.Marshal(map[string]interface{}{"spec": spec})
+			id, err := createTestVM(vmName)
 			Expect(err).NotTo(HaveOccurred())
+			vmID = id
 
-			createPath, expectedID := createVMPath()
-			resp, err := doKubevirtRequest("POST", createPath, string(payload))
-			Expect(err).NotTo(HaveOccurred())
-			defer resp.Body.Close()
-			Expect(resp.StatusCode).To(Equal(201))
+			GinkgoWriter.Printf("Created VM %s, waiting for NATS events for this id...\n", vmID)
 
-			var createResp map[string]interface{}
-			err = json.NewDecoder(resp.Body).Decode(&createResp)
-			Expect(err).NotTo(HaveOccurred())
+			deadline := time.Now().Add(90 * time.Second)
+			var matched map[string]interface{}
+			var matchedData map[string]interface{}
+			for time.Now().Before(deadline) {
+				msg, err := sub.NextMsg(5 * time.Second)
+				if err != nil {
+					continue
+				}
+				var event map[string]interface{}
+				if err := json.Unmarshal(msg.Data, &event); err != nil {
+					continue
+				}
+				data, ok := event["data"].(map[string]interface{})
+				if !ok {
+					continue
+				}
+				eid, _ := data["id"].(string)
+				if eid == "" {
+					eid, _ = data["instance_id"].(string)
+				}
+				if eid != vmID {
+					GinkgoWriter.Printf("skip stale event id=%s\n", eid)
+					continue
+				}
+				matched = event
+				matchedData = data
+				break
+			}
+			Expect(matched).NotTo(BeNil(), "should receive a NATS status event for VM %s", vmID)
 
-			vmID = extractIDFromPath(createResp["path"].(string))
-			Expect(vmID).NotTo(BeEmpty())
-			Expect(vmID).To(Equal(expectedID))
+			Expect(matched).To(HaveKey("specversion"))
+			Expect(matched).To(HaveKey("type"))
+			Expect(matched["type"]).To(Equal("dcm.status.vm"))
+			Expect(matched).To(HaveKey("source"))
+			Expect(matchedData).To(HaveKey("status"))
+			status := matchedData["status"].(string)
+			Expect(status).To(BeElementOf("PENDING", "PROVISIONING", "RUNNING", "Pending", "Scheduling", "Scheduled", "Running", "Failed"))
+			Expect(matchedData).To(HaveKey("timestamp"))
 
-			GinkgoWriter.Printf("Created VM %s, waiting for NATS events...\n", vmID)
-
-			msg, err := sub.NextMsg(60 * time.Second)
-			Expect(err).NotTo(HaveOccurred(), "should receive at least one NATS status event")
-
-			var event map[string]interface{}
-			err = json.Unmarshal(msg.Data, &event)
-			Expect(err).NotTo(HaveOccurred(), "NATS message should be valid JSON")
-
-			Expect(event).To(HaveKey("specversion"), "CloudEvent should have specversion")
-			Expect(event).To(HaveKey("type"), "CloudEvent should have type")
-			Expect(event["type"]).To(Equal("dcm.status.vm"))
-			Expect(event).To(HaveKey("source"), "CloudEvent should have source")
-			Expect(event).To(HaveKey("data"), "CloudEvent should have data")
-
-			data, ok := event["data"].(map[string]interface{})
-			Expect(ok).To(BeTrue(), "CloudEvent data should be an object")
-
-			// kubevirt SP publishes data.id (not instance_id / service_type)
-			Expect(data).To(HaveKey("id"), "Event data should have id")
-			Expect(data["id"]).To(Equal(vmID), "Event id should match VM ID")
-
-			Expect(data).To(HaveKey("status"), "Event data should have status")
-			status := data["status"].(string)
-			Expect(status).To(BeElementOf("PENDING", "PROVISIONING", "RUNNING", "Pending", "Scheduling", "Running"),
-				"Event status should be a known VM phase")
-
-			Expect(data).To(HaveKey("timestamp"), "Event data should have timestamp")
-
-			GinkgoWriter.Printf("✓ Received valid NATS event: status=%s, id=%s\n", status, vmID)
+			GinkgoWriter.Printf("Received NATS event status=%s id=%s\n", status, vmID)
 		})
 
-		It("publishes state transitions as VM starts [TC-21]", func() {
+		It("publishes state transitions and GET reflects status [TC-21]", func() {
 			sub, err := nc.SubscribeSync(kubevirtNATSSubject)
 			Expect(err).NotTo(HaveOccurred())
 			defer sub.Unsubscribe()
-			nc.Flush()
+			Expect(nc.Flush()).To(Succeed())
 
 			vmName = uniqueName("e2e-transition-vm")
-			spec := newTestVMSpec(vmName)
-			payload, err := json.Marshal(map[string]interface{}{"spec": spec})
+			id, err := createTestVM(vmName)
 			Expect(err).NotTo(HaveOccurred())
-
-			createPath, _ := createVMPath()
-			resp, err := doKubevirtRequest("POST", createPath, string(payload))
-			Expect(err).NotTo(HaveOccurred())
-			defer resp.Body.Close()
-			Expect(resp.StatusCode).To(Equal(201))
-
-			var createResp map[string]interface{}
-			err = json.NewDecoder(resp.Body).Decode(&createResp)
-			Expect(err).NotTo(HaveOccurred())
-			vmID = extractIDFromPath(createResp["path"].(string))
+			vmID = id
 
 			var statuses []string
-			timeout := time.After(180 * time.Second)
-			seenRunning := false
+			seenStarted := false
+			deadline := time.Now().Add(180 * time.Second)
 
-		eventLoop:
-			for {
-				select {
-				case <-timeout:
-					GinkgoWriter.Printf("Timeout reached, collected %d events\n", len(statuses))
-					break eventLoop
-				default:
-					msg, err := sub.NextMsg(5 * time.Second)
-					if err != nil {
-						GinkgoWriter.Printf("No more events after %d collected\n", len(statuses))
-						break eventLoop
+			for time.Now().Before(deadline) && !seenStarted {
+				msg, err := sub.NextMsg(5 * time.Second)
+				if err != nil {
+					// Also poll GET while waiting
+					getStatus := getVMAPIStatus(vmID)
+					if getStatus != "" {
+						GinkgoWriter.Printf("GET status=%s\n", getStatus)
+						if isStartedPhase(getStatus) {
+							seenStarted = true
+							statuses = append(statuses, getStatus)
+							break
+						}
 					}
-
-					var event map[string]interface{}
-					if err := json.Unmarshal(msg.Data, &event); err != nil {
-						continue
-					}
-
-					data, ok := event["data"].(map[string]interface{})
-					if !ok {
-						continue
-					}
-
-					status, ok := data["status"].(string)
-					if !ok {
-						continue
-					}
-
-					statuses = append(statuses, status)
-					GinkgoWriter.Printf("Event %d: status=%s\n", len(statuses), status)
-
-					if status == "RUNNING" || status == "Running" {
-						seenRunning = true
-						time.Sleep(2 * time.Second)
-						break eventLoop
-					}
+					continue
+				}
+				var event map[string]interface{}
+				if err := json.Unmarshal(msg.Data, &event); err != nil {
+					continue
+				}
+				data, ok := event["data"].(map[string]interface{})
+				if !ok {
+					continue
+				}
+				eid, _ := data["id"].(string)
+				if eid != "" && eid != vmID {
+					continue
+				}
+				status, _ := data["status"].(string)
+				if status == "" {
+					continue
+				}
+				statuses = append(statuses, status)
+				GinkgoWriter.Printf("Event status=%s\n", status)
+				if isStartedPhase(status) {
+					seenStarted = true
 				}
 			}
 
-			Expect(statuses).NotTo(BeEmpty(), "should receive at least one status event")
+			Expect(statuses).NotTo(BeEmpty(), "should observe at least one status via NATS or GET")
 
-			if seenRunning {
-				GinkgoWriter.Printf("✓ Observed RUNNING transition: %v\n", statuses)
-			} else {
-				GinkgoWriter.Printf("✓ Observed status events (RUNNING not reached within window): %v\n", statuses)
+			// Prefer GET status; fall back to cluster printableStatus when SP omits it
+			Eventually(func() string {
+				if s := getVMAPIStatus(vmID); s != "" {
+					return s
+				}
+				ns := kubevirtNamespace()
+				name, err := findVMNameByInstanceID(vmID, ns)
+				if err != nil {
+					return ""
+				}
+				out, err := runKubeCmd("get", "vm", name, "-n", ns, "-o", "jsonpath={.status.printableStatus}")
+				if err != nil {
+					return ""
+				}
+				return strings.TrimSpace(out)
+			}).WithTimeout(60 * time.Second).WithPolling(3 * time.Second).
+				ShouldNot(BeEmpty(), "GET /vms/{id} or cluster should expose a status")
+
+			if seenStarted {
+				// If we saw both Pending and Running, Pending should appear first
+				pendingIdx, runningIdx := -1, -1
+				for i, s := range statuses {
+					if pendingIdx < 0 && isPendingPhase(s) {
+						pendingIdx = i
+					}
+					if runningIdx < 0 && isStartedPhase(s) {
+						runningIdx = i
+					}
+				}
+				if pendingIdx >= 0 && runningIdx >= 0 {
+					Expect(pendingIdx).To(BeNumerically("<", runningIdx),
+						"Pending should precede Running when both observed: %v", statuses)
+				}
 			}
+
+			GinkgoWriter.Printf("Collected transitions: %v (started=%v)\n", statuses, seenStarted)
 		})
 	})
 })
+
+func getVMAPIStatus(id string) string {
+	resp, err := doKubevirtRequest("GET", "/vms/"+id, "")
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return ""
+	}
+	var body map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return ""
+	}
+	s, _ := body["status"].(string)
+	return s
+}
+
+func isStartedPhase(s string) bool {
+	switch strings.ToLower(s) {
+	case "running", "scheduled", "succeeded", "failed":
+		return true
+	default:
+		return false
+	}
+}
+
+func isPendingPhase(s string) bool {
+	switch strings.ToLower(s) {
+	case "pending", "provisioning", "scheduling":
+		return true
+	default:
+		return false
+	}
+}

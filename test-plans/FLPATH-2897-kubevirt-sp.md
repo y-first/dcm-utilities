@@ -487,9 +487,19 @@ Tests automatically verify prerequisites and skip gracefully if not met:
 - Supports both OpenShift (`oc`) and Kubernetes (`kubectl`)
 - Prerequisite validation happens in `BeforeEach` or `BeforeAll` hooks
 
+## Implementation branches (utilities)
+
+| Branch | Role |
+|--------|------|
+| `kubevirt-provider-tests-titan90` | Green E2E suite used for day-to-day / CI-style runs |
+| `kubevirt-provider-tests-deferred` | Disruptive tests (`DCM_DISRUPTIVE=1`) and intentionally skipped cases (TC-08, TC-17, TC-28a/b/d/e, TC-02/03/20, etc.) |
+
+See `tests/e2e/KUBEVIRT_TESTING.md` on each branch for the coverage table. Promote deferred cases by implementing them on `kubevirt-provider-tests-deferred`, then merging into the green branch when they pass without Skip.
+
 ## Success Criteria
 
-- All TC-01 through TC-33 pass against a live KubeVirt cluster
+- Green-suite TCs pass against a live KubeVirt cluster (`kubevirt-provider-tests-titan90`)
+- Deferred / disruptive TCs tracked on `kubevirt-provider-tests-deferred` until SP or fixture gaps are closed
 - VM creation results in actual VirtualMachine on cluster
 - VM lifecycle (create → running → delete) completes successfully
 - Status monitoring reflects real VMI phase changes

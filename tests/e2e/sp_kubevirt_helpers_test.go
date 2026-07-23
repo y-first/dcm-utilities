@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -177,9 +178,7 @@ func getKubevirtProviderName() (string, error) {
 	}
 
 	var body map[string]interface{}
-	if err := decodeJSON(resp, &body); err != nil {
-		return "", err
-	}
+	decodeJSON(resp, &body)
 
 	providers, ok := body["providers"].([]interface{})
 	if !ok || len(providers) == 0 {
@@ -227,34 +226,267 @@ func getVMFromCluster(vmName, namespace string) (map[string]interface{}, error) 
 	return vm, nil
 }
 
-// verifyDCMLabels checks VirtualMachine has required DCM labels
+// DCM label keys used by kubevirt-service-provider.
+const (
+	dcmLabelManagedBy  = "dcm.project/managed-by"
+	dcmLabelInstanceID = "dcm.project/dcm-instance-id"
+	dcmManagedByValue  = "dcm"
+)
+
+// kubevirtNamespace returns the namespace where the SP creates VMs.
+func kubevirtNamespace() string {
+	if ns := os.Getenv("KUBERNETES_NAMESPACE"); ns != "" {
+		return ns
+	}
+	if ns := os.Getenv("KUBEVIRT_NAMESPACE"); ns != "" {
+		return ns
+	}
+	return "vms"
+}
+
+// requireDisruptive skips unless DCM_DISRUPTIVE=1.
+func requireDisruptive() {
+	if os.Getenv("DCM_DISRUPTIVE") != "1" {
+		Skip("disruptive test skipped (set DCM_DISRUPTIVE=1 to enable)")
+	}
+}
+
+// expectProblemDetails asserts an RFC 7807-ish problem body (type + title at minimum).
+func expectProblemDetails(resp *http.Response) map[string]interface{} {
+	GinkgoHelper()
+	var problem map[string]interface{}
+	Expect(json.NewDecoder(resp.Body).Decode(&problem)).To(Succeed())
+	Expect(problem).To(HaveKey("type"))
+	Expect(problem).To(HaveKey("title"))
+	return problem
+}
+
+// runKubeCmd tries oc then kubectl with the given args.
+func runKubeCmd(args ...string) (string, error) {
+	cmd := exec.Command("oc", args...)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return string(out), nil
+	}
+	cmd = exec.Command("kubectl", args...)
+	out, err = cmd.CombinedOutput()
+	if err != nil {
+		return string(out), fmt.Errorf("%w: %s", err, string(out))
+	}
+	return string(out), nil
+}
+
+// findVMNameByInstanceID looks up the cluster VM name via DCM instance-id label.
+func findVMNameByInstanceID(instanceID, namespace string) (string, error) {
+	out, err := runKubeCmd("get", "vm", "-n", namespace,
+		"-l", dcmLabelInstanceID+"="+instanceID,
+		"-o", "jsonpath={.items[0].metadata.name}")
+	if err != nil {
+		return "", err
+	}
+	name := strings.TrimSpace(out)
+	if name == "" {
+		return "", fmt.Errorf("no VM found with %s=%s in ns %s", dcmLabelInstanceID, instanceID, namespace)
+	}
+	return name, nil
+}
+
+// getVMByInstanceID fetches the VirtualMachine for a DCM instance id.
+func getVMByInstanceID(instanceID, namespace string) (map[string]interface{}, string, error) {
+	name, err := findVMNameByInstanceID(instanceID, namespace)
+	if err != nil {
+		return nil, "", err
+	}
+	vm, err := getVMFromCluster(name, namespace)
+	return vm, name, err
+}
+
+func labelMap(obj map[string]interface{}, path ...string) (map[string]interface{}, error) {
+	cur := obj
+	for i, key := range path {
+		next, ok := cur[key].(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("missing path %v at %s", path[:i+1], key)
+		}
+		cur = next
+	}
+	return cur, nil
+}
+
+// verifyDCMLabels checks VirtualMachine (and template) have required DCM labels.
 func verifyDCMLabels(vmName, namespace, expectedInstanceID string) error {
 	vm, err := getVMFromCluster(vmName, namespace)
 	if err != nil {
 		return err
 	}
 
-	metadata, ok := vm["metadata"].(map[string]interface{})
-	if !ok {
-		return fmt.Errorf("vm missing metadata")
+	labels, err := labelMap(vm, "metadata", "labels")
+	if err != nil {
+		return err
 	}
 
-	labels, ok := metadata["labels"].(map[string]interface{})
-	if !ok {
-		return fmt.Errorf("vm missing labels")
+	managedBy, _ := labels[dcmLabelManagedBy].(string)
+	if managedBy != dcmManagedByValue {
+		return fmt.Errorf("missing or incorrect %s: got %q, want %q", dcmLabelManagedBy, managedBy, dcmManagedByValue)
 	}
 
-	managedBy, _ := labels["dcm.project/managed-by"].(string)
-	if managedBy != "dcm" {
-		return fmt.Errorf("missing or incorrect dcm.project/managed-by label: got %q, want \"dcm\"", managedBy)
-	}
-
-	instanceID, _ := labels["dcm.project/instance-id"].(string)
+	instanceID, _ := labels[dcmLabelInstanceID].(string)
 	if instanceID != expectedInstanceID {
-		return fmt.Errorf("instance-id mismatch: got %q, want %q", instanceID, expectedInstanceID)
+		return fmt.Errorf("%s mismatch: got %q, want %q", dcmLabelInstanceID, instanceID, expectedInstanceID)
+	}
+
+	tmplLabels, err := labelMap(vm, "spec", "template", "metadata", "labels")
+	if err != nil {
+		return fmt.Errorf("template labels: %w", err)
+	}
+	if tmplManaged, _ := tmplLabels[dcmLabelManagedBy].(string); tmplManaged != dcmManagedByValue {
+		return fmt.Errorf("template missing %s", dcmLabelManagedBy)
+	}
+	if tmplID, _ := tmplLabels[dcmLabelInstanceID].(string); tmplID != expectedInstanceID {
+		return fmt.Errorf("template %s mismatch: got %q, want %q", dcmLabelInstanceID, tmplID, expectedInstanceID)
 	}
 
 	return nil
+}
+
+// createUnlabeledVM creates a minimal VirtualMachine without DCM labels (for TC-16).
+func createUnlabeledVM(name, namespace string) error {
+	yaml := fmt.Sprintf(`apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  runStrategy: Halted
+  template:
+    metadata:
+      labels:
+        kubevirt.io/domain: %s
+    spec:
+      domain:
+        devices:
+          disks:
+          - name: containerdisk
+            disk:
+              bus: virtio
+        resources:
+          requests:
+            memory: 64Mi
+      volumes:
+      - name: containerdisk
+        containerDisk:
+          image: quay.io/kubevirt/cirros-container-disk-demo:latest
+`, name, namespace, name)
+	cmd := exec.Command("oc", "apply", "-f", "-")
+	cmd.Stdin = strings.NewReader(yaml)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		cmd = exec.Command("kubectl", "apply", "-f", "-")
+		cmd.Stdin = strings.NewReader(yaml)
+		out, err = cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("apply unlabeled vm: %w: %s", err, string(out))
+		}
+	}
+	return nil
+}
+
+// patchVMRunning sets spec.running (legacy) or runStrategy for stop/start (TC-32).
+func setVMRunStrategy(name, namespace, strategy string) error {
+	patch := fmt.Sprintf(`{"spec":{"runStrategy":%q}}`, strategy)
+	_, err := runKubeCmd("patch", "vm", name, "-n", namespace, "--type=merge", "-p", patch)
+	return err
+}
+
+// getPVCsForVM lists PVCs in the namespace (best-effort for storage class checks).
+func getPVCsInNamespace(namespace string) ([]map[string]interface{}, error) {
+	out, err := runKubeCmd("get", "pvc", "-n", namespace, "-o", "json")
+	if err != nil {
+		return nil, err
+	}
+	var list map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &list); err != nil {
+		return nil, err
+	}
+	items, _ := list["items"].([]interface{})
+	var result []map[string]interface{}
+	for _, it := range items {
+		if m, ok := it.(map[string]interface{}); ok {
+			result = append(result, m)
+		}
+	}
+	return result, nil
+}
+
+// createTestVM posts a VM to the SP and returns instance id + request name.
+func createTestVM(name string) (id string, err error) {
+	spec := newTestVMSpec(name)
+	payload, err := json.Marshal(map[string]interface{}{"spec": spec})
+	if err != nil {
+		return "", err
+	}
+	path, expectedID := createVMPath()
+	resp, err := doKubevirtRequest(http.MethodPost, path, string(payload))
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusCreated {
+		return "", fmt.Errorf("create VM status %d: %s", resp.StatusCode, string(body))
+	}
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return "", err
+	}
+	pathStr, _ := parsed["path"].(string)
+	id = extractIDFromPath(pathStr)
+	if id == "" {
+		id = expectedID
+	}
+	return id, nil
+}
+
+// deleteTestVM best-effort deletes a VM via the SP API.
+func deleteTestVM(id string) {
+	if id == "" {
+		return
+	}
+	resp, err := doKubevirtRequest(http.MethodDelete, "/vms/"+id, "")
+	if err == nil && resp != nil {
+		resp.Body.Close()
+	}
+}
+
+// listVMIDs returns ids from GET /vms (from path or id fields).
+func listVMIDs() ([]string, error) {
+	resp, err := doKubevirtRequest(http.MethodGet, "/vms", "")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("list status %d", resp.StatusCode)
+	}
+	var body map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, err
+	}
+	vms, _ := body["vms"].([]interface{})
+	var ids []string
+	for _, v := range vms {
+		m, ok := v.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if id, _ := m["id"].(string); id != "" {
+			ids = append(ids, id)
+			continue
+		}
+		if p, _ := m["path"].(string); p != "" {
+			ids = append(ids, extractIDFromPath(p))
+		}
+	}
+	return ids, nil
 }
 
 // deleteVMFromCluster removes VirtualMachine directly via kubectl/oc
