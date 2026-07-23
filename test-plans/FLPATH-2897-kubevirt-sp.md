@@ -492,9 +492,9 @@ Tests automatically verify prerequisites and skip gracefully if not met:
 | Branch | Role |
 |--------|------|
 | `kubevirt-provider-tests-titan90` | Green E2E suite used for day-to-day / CI-style runs |
-| `kubevirt-provider-tests-deferred` | Disruptive tests (`DCM_DISRUPTIVE=1`) and intentionally skipped cases (TC-08, TC-17, TC-28a/b/d/e, TC-02/03/20, etc.) |
+| `kubevirt-provider-tests-deferred` | **This branch** — disruptive tests (`DCM_DISRUPTIVE=1`) and intentionally skipped cases (TC-08, TC-17, TC-28a/b/d/e, TC-02/03/05/20/30, etc.) |
 
-See `tests/e2e/KUBEVIRT_TESTING.md` on each branch for the coverage table. Promote deferred cases by implementing them on `kubevirt-provider-tests-deferred`, then merging into the green branch when they pass without Skip.
+See `tests/e2e/KUBEVIRT_TESTING.md` on each branch for the coverage table. Implement deferred cases here, then merge into `kubevirt-provider-tests-titan90` when they pass without Skip.
 
 ## Success Criteria
 
