@@ -140,6 +140,7 @@ EOF
   --deploy-acm                   Deploy ACM on the cluster before starting the stack (opt-in, heavy)
   --deploy-mce                   Deploy MCE on the cluster before starting the stack (opt-in, heavy)
   --deploy-cnv                   Deploy OpenShift Virtualization (CNV) on the cluster before starting the stack (opt-in, heavy)
+  --cluster-prereqs-only         Run ACM/MCE/CNV cluster prereqs only, then exit (no compose stack)
   --acm-cluster-sp-repo URL      Git repo for acm-cluster-service-provider (default: ${DEFAULT_ACM_CLUSTER_SP_REPO})
   --acm-cluster-sp-branch REF    Branch to clone (default: ${DEFAULT_ACM_CLUSTER_SP_BRANCH})
   --kubeconfig PATH              Path to kubeconfig file (auto-detected if omitted)
@@ -204,6 +205,7 @@ Examples:
   $(basename "$0") --k8s-storage-service-provider --kubeconfig ~/.kube/config
   $(basename "$0") --all-service-providers --cluster-api https://api.cluster.example.com --cluster-password secret
   $(basename "$0") --acm-cluster-service-provider --deploy-acm --kubeconfig ~/.kube/config
+  $(basename "$0") --deploy-cnv --deploy-acm --kubeconfig ~/.kube/config --cluster-prereqs-only
   $(basename "$0") --auth-enabled
   $(basename "$0") --tear-down
   $(basename "$0") --running-versions
@@ -762,6 +764,7 @@ CONTROL_PLANE_TMP_DIR="${CONTROL_PLANE_TMP_DIR:-${DEFAULT_CONTROL_PLANE_TMP_DIR}
 TEAR_DOWN=false
 RUNNING_VERSIONS=false
 CLEANUP_ON_FAILURE=false
+CLUSTER_PREREQS_ONLY=false
 DEPLOY_ACM_MCE=""
 DEPLOY_CNV=false
 GITOPS_ENABLED=false
@@ -834,6 +837,8 @@ while [[ $# -gt 0 ]]; do
         --deploy-mce)
             [[ -n "${DEPLOY_ACM_MCE}" ]] && { err "--deploy-acm and --deploy-mce are mutually exclusive"; exit 1; }
             DEPLOY_ACM_MCE="mce"; shift ;;
+        --cluster-prereqs-only)
+            CLUSTER_PREREQS_ONLY=true; shift ;;
         --acm-cluster-sp-repo)
             require_arg "$1" "${2:-}"
             ACM_CLUSTER_SP_REPO="${2:-}"; shift 2 ;;
@@ -885,7 +890,9 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-validate_deploy_dir "${CONTROL_PLANE_TMP_DIR}" || exit 1
+if [[ "${CLUSTER_PREREQS_ONLY}" != true ]]; then
+    validate_deploy_dir "${CONTROL_PLANE_TMP_DIR}" || exit 1
+fi
 
 # --- Build compose args from enabled providers ----------------------------- #
 
@@ -949,19 +956,6 @@ fi
 
 log "Checking prerequisites"
 
-REQUIRED_TOOLS=(git podman podman-compose curl jq)
-
-for i in $(seq 0 $((PROV_COUNT - 1))); do
-    [[ "${PROV_ENABLED[$i]}" == true ]] || continue
-    resolve_provider_cli "${i}"
-done
-
-check_required_tools "${REQUIRED_TOOLS[@]}" || exit 1
-info "All prerequisites found: ${REQUIRED_TOOLS[*]}"
-
-ensure_podman_running || exit 1
-
-# Resolve cluster credentials only when a provider needs cluster access or ACM/MCE deploy is enabled
 any_provider_needs_cluster() {
     local i
     for i in $(seq 0 $((PROV_COUNT - 1))); do
@@ -970,41 +964,74 @@ any_provider_needs_cluster() {
     done
     return 1
 }
-if any_provider_needs_cluster || [[ -n "${DEPLOY_ACM_MCE}" ]]; then
+
+if [[ "${CLUSTER_PREREQS_ONLY}" == true ]]; then
+    if [[ -z "${DEPLOY_ACM_MCE}" ]] && [[ "${DEPLOY_CNV}" != true ]]; then
+        err "--cluster-prereqs-only requires at least one of --deploy-acm, --deploy-mce, or --deploy-cnv"
+        exit 1
+    fi
+    REQUIRED_TOOLS=(git curl)
+    if command -v oc &>/dev/null; then
+        REQUIRED_TOOLS+=(oc)
+    elif command -v kubectl &>/dev/null; then
+        REQUIRED_TOOLS+=(kubectl)
+    else
+        err "Missing required tools: oc or kubectl"
+        exit 1
+    fi
+    check_required_tools "${REQUIRED_TOOLS[@]}" || exit 1
+    info "All prerequisites found: ${REQUIRED_TOOLS[*]}"
     resolve_kubeconfig || exit 1
-fi
+else
+    REQUIRED_TOOLS=(git podman podman-compose curl jq)
 
-# Validate and export env vars for each enabled provider
-for i in $(seq 0 $((PROV_COUNT - 1))); do
-    [[ "${PROV_ENABLED[$i]}" == true ]] || continue
+    for i in $(seq 0 $((PROV_COUNT - 1))); do
+        [[ "${PROV_ENABLED[$i]}" == true ]] || continue
+        resolve_provider_cli "${i}"
+    done
 
-    local_ns="${PROV_NAMESPACES[$i]}"
-    local_cli="${PROV_CLIS[$i]}"
-    local_hook="${PROV_VALIDATES[$i]}"
+    check_required_tools "${REQUIRED_TOOLS[@]}" || exit 1
+    info "All prerequisites found: ${REQUIRED_TOOLS[*]}"
 
-    # Cluster connectivity check (common to all providers)
-    if [[ -n "${local_cli}" ]] && [[ -n "${DCM_KUBECONFIG}" ]]; then
-        info "Verifying cluster connectivity for ${PROV_LABELS[$i]} (using ${local_cli})..."
-        if ! "${local_cli}" --kubeconfig="${DCM_KUBECONFIG}" cluster-info &>/dev/null; then
-            err "Cannot connect to cluster using kubeconfig: ${DCM_KUBECONFIG}"
-            exit 1
+    ensure_podman_running || exit 1
+
+    # Resolve cluster credentials when a provider needs cluster access or ACM/MCE/CNV deploy is enabled
+    if any_provider_needs_cluster || [[ -n "${DEPLOY_ACM_MCE}" ]] || [[ "${DEPLOY_CNV}" == true ]]; then
+        resolve_kubeconfig || exit 1
+    fi
+
+    # Validate and export env vars for each enabled provider
+    for i in $(seq 0 $((PROV_COUNT - 1))); do
+        [[ "${PROV_ENABLED[$i]}" == true ]] || continue
+
+        local_ns="${PROV_NAMESPACES[$i]}"
+        local_cli="${PROV_CLIS[$i]}"
+        local_hook="${PROV_VALIDATES[$i]}"
+
+        # Cluster connectivity check (common to all providers)
+        if [[ -n "${local_cli}" ]] && [[ -n "${DCM_KUBECONFIG}" ]]; then
+            info "Verifying cluster connectivity for ${PROV_LABELS[$i]} (using ${local_cli})..."
+            if ! "${local_cli}" --kubeconfig="${DCM_KUBECONFIG}" cluster-info &>/dev/null; then
+                err "Cannot connect to cluster using kubeconfig: ${DCM_KUBECONFIG}"
+                exit 1
+            fi
+            info "Cluster is reachable"
         fi
-        info "Cluster is reachable"
-    fi
 
-    # Provider-specific validation
-    if [[ -n "${local_hook}" ]] && type -t "${local_hook}" &>/dev/null; then
-        "${local_hook}" "${DCM_KUBECONFIG}" "${local_ns}" "${local_cli}" || exit 1
-    fi
+        # Provider-specific validation
+        if [[ -n "${local_hook}" ]] && type -t "${local_hook}" &>/dev/null; then
+            "${local_hook}" "${DCM_KUBECONFIG}" "${local_ns}" "${local_cli}" || exit 1
+        fi
 
-    # Export compose substitution vars
-    if [[ -n "${PROV_KC_EXPORTS[$i]}" ]]; then
-        export "${PROV_KC_EXPORTS[$i]}=${DCM_KUBECONFIG}"
-    fi
-    if [[ -n "${PROV_NS_EXPORTS[$i]}" ]]; then
-        export "${PROV_NS_EXPORTS[$i]}=${local_ns}"
-    fi
-done
+        # Export compose substitution vars
+        if [[ -n "${PROV_KC_EXPORTS[$i]}" ]]; then
+            export "${PROV_KC_EXPORTS[$i]}=${DCM_KUBECONFIG}"
+        fi
+        if [[ -n "${PROV_NS_EXPORTS[$i]}" ]]; then
+            export "${PROV_NS_EXPORTS[$i]}=${local_ns}"
+        fi
+    done
+fi
 
 # --- ACM / MCE deployment -------------------------------------------------- #
 
@@ -1197,6 +1224,11 @@ CNVEOF
 
         log "OpenShift Virtualization (CNV) is ready"
     fi
+fi
+
+if [[ "${CLUSTER_PREREQS_ONLY}" == true ]]; then
+    log "Cluster prereqs complete (--cluster-prereqs-only); skipping compose stack deploy"
+    exit 0
 fi
 
 # --- Version pinning ------------------------------------------------------- #
