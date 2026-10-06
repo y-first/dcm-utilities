@@ -163,7 +163,8 @@ EOF
   --cluster-api URL              OpenShift API URL for oc login
   --cluster-username USER        Username for oc login (default: kubeadmin)
   --cluster-password PASS        Password for oc login
-  --compose-file PATH            Additional compose file to merge (repeatable, e.g. port overrides)
+  --compose-file PATH            Additional compose file to merge (repeatable). Applied last so
+                                 values override provider overlays (e.g. CI host.containers.internal)
   --auth-enabled                 Enable authentication (loads auth Compose override and profile; starts Keycloak)
   --cleanup-on-failure           Tear down the stack automatically if deployment fails (default: leave for debugging)
   --running-versions             Print versions of all running containers and write dcm-versions.json
@@ -874,6 +875,9 @@ OPENSHIFT_USERNAME="${OPENSHIFT_USERNAME:-kubeadmin}"
 OPENSHIFT_PASSWORD="${OPENSHIFT_PASSWORD:-}"
 AUTH_ENABLED_EXPLICIT=false
 COMPOSE_EXTRA_FILE_ARGS=()
+# --compose-file paths are held separately and appended after provider/gitops
+# overlays so later files win (Compose merge).
+COMPOSE_CLI_FILE_ARGS=()
 WITH_ENVIRONMENT_AGENT=false
 AGENT_EMBEDDED_SPS="${AGENT_EMBEDDED_SPS:-}"
 AGENT_PORT="${AGENT_PORT:-${DEFAULT_AGENT_PORT}}"
@@ -966,7 +970,7 @@ while [[ $# -gt 0 ]]; do
             OPENSHIFT_PASSWORD="${2:-}"; shift 2 ;;
         --compose-file)
             require_arg "$1" "${2:-}"
-            COMPOSE_EXTRA_FILE_ARGS+=("-f" "$(cd "$(dirname "${2:-}")" && pwd)/$(basename "${2:-}")")
+            COMPOSE_CLI_FILE_ARGS+=("-f" "$(cd "$(dirname "${2:-}")" && pwd)/$(basename "${2:-}")")
             shift 2 ;;
         --auth-enabled)
             AUTH_ENABLED_EXPLICIT=true; shift ;;
@@ -1023,6 +1027,11 @@ if [[ "${GITOPS_ENABLED}" == true ]]; then
     fi
     COMPOSE_EXTRA_FILE_ARGS+=("-f" "${GITOPS_COMPOSE_OVERRIDE}")
     info "Injecting dcm-gitops reconciliation container"
+fi
+
+if ((${#COMPOSE_CLI_FILE_ARGS[@]})); then
+    COMPOSE_EXTRA_FILE_ARGS+=("${COMPOSE_CLI_FILE_ARGS[@]}")
+    info "Applying --compose-file overlay(s) last ($((${#COMPOSE_CLI_FILE_ARGS[@]} / 2)) file(s))"
 fi
 
 AUTH_ENABLED=false
