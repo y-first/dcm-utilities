@@ -35,7 +35,7 @@ var _ = Describe("Rehydration Negative Cases", Label("rehydration", "negative"),
 		Expect(resp.StatusCode).To(Equal(http.StatusFailedDependency)) // 424
 	})
 
-	It("returns 422 when all providers are unhealthy", Label("disruptive"), func() {
+		It("returns 422 when all agents are unhealthy", Label("disruptive"), func() {
 		requirePodman()
 
 		provider := threeTierProviders[0]

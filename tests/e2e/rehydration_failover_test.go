@@ -15,7 +15,7 @@ var _ = Describe("Rehydration Failover", Label("rehydration", "failover", "disru
 		requirePodman()
 	})
 
-	Context("provider failover", Ordered, func() {
+	Context("agent failover", Ordered, func() {
 		var (
 			instanceUID string
 			policyID    string
@@ -50,7 +50,7 @@ var _ = Describe("Rehydration Failover", Label("rehydration", "failover", "disru
 			}
 		})
 
-		It("rehydrate after provider stop moves workload to healthy provider", Label("cluster"), func() {
+		It("rehydrate after agent stop moves workload to healthy agent", Label("cluster"), func() {
 			preInst := getInstance(instanceUID)
 			origResourceID := preInst.ResourceID
 

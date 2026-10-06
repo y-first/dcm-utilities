@@ -1,10 +1,32 @@
-# Compose override: adds the three-tier app demo service provider to the DCM stack.
-# Provisions a 3-tier Pet Clinic app (DB + app + web) using mock backend.
+# Compose override: three-tier app demo SP-A plus a dedicated thin agent.
+# The SP registers to rehydrate-agent-a (POST /providers). The agent
+# advertises three-tier-app-demo to the control plane. Disruptive
+# rehydration tests stop this agent, not the SP.
 #
 # Injected automatically by deploy-dcm.sh via the provider registry
 # (providers/three-tier-app-demo.conf → COMPOSE_OVERRIDE).
 
 services:
+  rehydrate-agent-a:
+    image: quay.io/dcm-project/environment-agent:${ENVIRONMENT_AGENT_VERSION:-main}
+    environment:
+      AGENT_NAME: rehydrate-agent-a
+      AGENT_ENVIRONMENT: ${AGENT_ENVIRONMENT:-dev}
+      AGENT_COST: ${AGENT_COST:-low}
+      AGENT_EMBEDDED_SPS: ""
+      AGENT_SERVER_ADDRESS: ":8080"
+      AGENT_SP_PERSISTENCE_PATH: /tmp/registrations.json
+      AGENT_MESSAGING_URL: nats://nats:4222
+      DCM_REGISTRATION_URL: http://control-plane:8080
+      AUTH_DISABLED: ${AUTH_DISABLED:-true}
+    expose:
+      - "8080"
+    ports:
+      - "18181:8080"
+    depends_on:
+      control-plane: { condition: service_started }
+      nats: { condition: service_started }
+
   three-tier-sp-init-db:
     image: docker.io/library/postgres:16-alpine
     entrypoint: ["sh", "-c", "until pg_isready -h postgres -U admin; do sleep 1; done && psql -h postgres -U admin -d postgres -tc \"SELECT 1 FROM pg_database WHERE datname='three_tier_sp'\" | grep -q 1 || psql -h postgres -U admin -d postgres -c 'CREATE DATABASE three_tier_sp'"]
@@ -26,8 +48,9 @@ services:
       DB_USER: "admin"
       DB_PASS: ${POSTGRES_PASSWORD:-adminpass}
       SP_NAME: ${THREE_TIER_DEMO_SP_NAME:-three-tier-demo-sp}
+      SP_REGION: "east"
       SP_ENDPOINT: "http://three-tier-app-demo-service-provider:8080"
-      DCM_REGISTRATION_URL: "http://control-plane:8080/api/v1alpha1"
+      DCM_REGISTRATION_URL: "http://rehydrate-agent-a:8080/api/v1alpha1"
       SP_NATS_URL: "nats://nats:4222"
     expose:
       - "8080"
@@ -37,3 +60,4 @@ services:
       postgres: { condition: service_healthy }
       control-plane: { condition: service_started }
       nats: { condition: service_started }
+      rehydrate-agent-a: { condition: service_started }

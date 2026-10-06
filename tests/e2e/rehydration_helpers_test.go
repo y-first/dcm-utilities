@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
@@ -20,7 +21,7 @@ const (
 	provisionTimeout = 120 * time.Second
 	rehydrateTimeout = 90 * time.Second
 	cleanupTimeout   = 90 * time.Second
-	healthTimeout    = 90 * time.Second
+	healthTimeout    = 120 * time.Second
 	pollInterval     = 2 * time.Second
 )
 
@@ -159,6 +160,9 @@ func initThreeTierSP() {
 	for _, p := range agentsList {
 		provider, _ := p.(map[string]interface{})
 		name, _ := provider["name"].(string)
+		if !isRehydrateAgent(name) {
+			continue
+		}
 		health := stringField(provider, "health_status")
 
 		serviceTypes, _ := provider["service_types"].([]interface{})
@@ -190,10 +194,14 @@ func initThreeTierSP() {
 		}
 
 		tp.Namespace = resolveProviderNamespace(name)
-
 		threeTierProviders = append(threeTierProviders, tp)
+	}
 
-		region := resolveProviderRegion(name)
+	sort.Slice(threeTierProviders, func(i, j int) bool {
+		return threeTierProviders[i].Name < threeTierProviders[j].Name
+	})
+	for _, tp := range threeTierProviders {
+		region := resolveProviderRegion(tp.Name)
 		if region != "" {
 			providersByRegion[region] = append(providersByRegion[region], tp)
 		}
@@ -203,7 +211,7 @@ func initThreeTierSP() {
 	multiProviderAvailable = len(threeTierProviders) >= 2
 	threeProviderAvailable = len(threeTierProviders) >= 3
 
-	GinkgoWriter.Printf("Three-tier SPs discovered: %d (multi=%v, three=%v)\n",
+	GinkgoWriter.Printf("Three-tier agents discovered: %d (multi=%v, three=%v)\n",
 		len(threeTierProviders), multiProviderAvailable, threeProviderAvailable)
 	for _, tp := range threeTierProviders {
 		GinkgoWriter.Printf("  - %s (health=%s, ns=%s, container=%s)\n",
@@ -211,21 +219,16 @@ func initThreeTierSP() {
 	}
 }
 
-func resolveContainerName(providerName string) string {
-	var searchName string
-	switch {
-	case strings.HasSuffix(providerName, "sp-b"):
-		searchName = "three-tier-app-demo-sp-b"
-	case strings.HasSuffix(providerName, "sp-c"):
-		searchName = "three-tier-app-demo-sp-c"
-	default:
-		searchName = "three-tier-app-demo-service-provider"
-	}
+func isRehydrateAgent(name string) bool {
+	return strings.HasPrefix(name, "rehydrate-agent-")
+}
 
+func resolveContainerName(agentName string) string {
+	searchName := agentName
 	out, err := exec.Command(podmanBin, "ps", "-a", "--filter", "name="+searchName, "--format", "{{.Names}}").CombinedOutput()
 	if err == nil {
 		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-			if line != "" && !strings.Contains(line, "init-db") {
+			if line != "" && strings.Contains(line, searchName) {
 				return line
 			}
 		}
@@ -234,20 +237,20 @@ func resolveContainerName(providerName string) string {
 	return "dcm-e2e_" + searchName + "_1"
 }
 
-func resolveProviderNamespace(providerName string) string {
+func resolveProviderNamespace(agentName string) string {
 	switch {
-	case strings.Contains(providerName, "sp-b"):
+	case strings.HasSuffix(agentName, "-b"):
 		return "rehydrate-ns-b"
-	case strings.Contains(providerName, "sp-c"):
+	case strings.HasSuffix(agentName, "-c"):
 		return "rehydrate-ns-c"
 	default:
 		return "rehydrate-ns-a"
 	}
 }
 
-func resolveProviderRegion(providerName string) string {
+func resolveProviderRegion(agentName string) string {
 	switch {
-	case strings.Contains(providerName, "sp-c"):
+	case strings.HasSuffix(agentName, "-c"):
 		return "west"
 	default:
 		return "east"
@@ -269,19 +272,19 @@ func firstResourceID(body map[string]interface{}) string {
 
 func requireThreeTierSP() {
 	if !threeTierSPReady {
-		Skip("No three-tier SP available (deploy with --three-tier-app-demo-service-provider)")
+		Skip("No three-tier agent available (deploy --three-tier-app-demo-service-provider so rehydrate-agent-a is ready)")
 	}
 }
 
 func requireMultiProvider() {
 	if !multiProviderAvailable {
-		Skip("Multi-provider not available (need 2+ three-tier SPs)")
+		Skip("Need 2+ three-tier agents (deploy --three-tier-app-demo-service-provider and -2)")
 	}
 }
 
 func requireThreeProviders() {
 	if !threeProviderAvailable {
-		Skip("Three providers not available (need 3 three-tier SPs for sovereignty tests)")
+		Skip("Need 3 three-tier agents for sovereignty tests (deploy three-tier SPs 1–3)")
 	}
 }
 
@@ -519,21 +522,21 @@ main := {"selected_agent": "%s"} if { true }`, providerName)
 
 func stopProvider(provider ThreeTierProvider) {
 	Expect(provider.ContainerName).NotTo(BeEmpty(),
-		"cannot stop provider %s — container name not resolved", provider.Name)
+		"cannot stop agent %s — container name not resolved", provider.Name)
 	out, err := exec.Command(podmanBin, "stop", provider.ContainerName).CombinedOutput()
 	Expect(err).NotTo(HaveOccurred(),
 		"podman stop %s failed: %s", provider.ContainerName, string(out))
-	GinkgoWriter.Printf("Stopped provider %s (container: %s)\n", provider.Name, provider.ContainerName)
+	GinkgoWriter.Printf("Stopped agent %s (container: %s)\n", provider.Name, provider.ContainerName)
 }
 
 func startProvider(provider ThreeTierProvider) {
 	Expect(provider.ContainerName).NotTo(BeEmpty(),
-		"cannot start provider %s — container name not resolved", provider.Name)
+		"cannot start agent %s — container name not resolved", provider.Name)
 
 	out, err := exec.Command(podmanBin, "start", provider.ContainerName).CombinedOutput()
 	Expect(err).NotTo(HaveOccurred(),
 		"podman start %s failed: %s", provider.ContainerName, string(out))
-	GinkgoWriter.Printf("Started provider %s (container: %s)\n", provider.Name, provider.ContainerName)
+	GinkgoWriter.Printf("Started agent %s (container: %s)\n", provider.Name, provider.ContainerName)
 }
 
 func restartSPRM() {

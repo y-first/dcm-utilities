@@ -1,10 +1,30 @@
-# Compose override: second three-tier app demo SP for multi-provider rehydration testing.
-# Uses mock container backend (same as SP-A) — no real K8s resources.
+# Compose override: second three-tier app demo SP plus rehydrate-agent-b.
+# Region "east" (same as SP-A) for sovereignty/failover grouping.
 #
 # Injected automatically by deploy-dcm.sh via the provider registry
 # (providers/three-tier-app-demo-2.conf → COMPOSE_OVERRIDE).
 
 services:
+  rehydrate-agent-b:
+    image: quay.io/dcm-project/environment-agent:${ENVIRONMENT_AGENT_VERSION:-main}
+    environment:
+      AGENT_NAME: rehydrate-agent-b
+      AGENT_ENVIRONMENT: ${AGENT_ENVIRONMENT:-dev}
+      AGENT_COST: ${AGENT_COST:-low}
+      AGENT_EMBEDDED_SPS: ""
+      AGENT_SERVER_ADDRESS: ":8080"
+      AGENT_SP_PERSISTENCE_PATH: /tmp/registrations.json
+      AGENT_MESSAGING_URL: nats://nats:4222
+      DCM_REGISTRATION_URL: http://control-plane:8080
+      AUTH_DISABLED: ${AUTH_DISABLED:-true}
+    expose:
+      - "8080"
+    ports:
+      - "18182:8080"
+    depends_on:
+      control-plane: { condition: service_started }
+      nats: { condition: service_started }
+
   three-tier-sp-b-init-db:
     image: docker.io/library/postgres:16-alpine
     entrypoint: ["sh", "-c", "until pg_isready -h postgres -U admin; do sleep 1; done && psql -h postgres -U admin -d postgres -tc \"SELECT 1 FROM pg_database WHERE datname='three_tier_sp_b'\" | grep -q 1 || psql -h postgres -U admin -d postgres -c 'CREATE DATABASE three_tier_sp_b'"]
@@ -28,7 +48,7 @@ services:
       SP_NAME: "three-tier-sp-b"
       SP_REGION: "east"
       SP_ENDPOINT: "http://three-tier-app-demo-sp-b:8080"
-      DCM_REGISTRATION_URL: "http://control-plane:8080/api/v1alpha1"
+      DCM_REGISTRATION_URL: "http://rehydrate-agent-b:8080/api/v1alpha1"
       SP_NATS_URL: "nats://nats:4222"
     expose:
       - "8080"
@@ -38,3 +58,4 @@ services:
       postgres: { condition: service_healthy }
       control-plane: { condition: service_started }
       nats: { condition: service_started }
+      rehydrate-agent-b: { condition: service_started }
