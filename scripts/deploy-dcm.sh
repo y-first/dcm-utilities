@@ -148,7 +148,9 @@ EOF
   --deploy-acm                   Deploy ACM on the cluster before starting the stack (opt-in, heavy)
   --deploy-mce                   Deploy MCE on the cluster before starting the stack (opt-in, heavy)
   --deploy-cnv                   Deploy OpenShift Virtualization (CNV) on the cluster before starting the stack (opt-in, heavy)
-  --cluster-prereqs-only         Run ACM/MCE/CNV cluster prereqs only, then exit (no compose stack)
+  --cluster-prereqs-only         Run ACM/MCE/CNV cluster prereqs only, then exit (no compose/Helm stack).
+                                 With --agent-embedded-sps, auto-enables --deploy-cnv for vm and
+                                 --deploy-acm for cluster when those deploy flags are not set.
   --acm-cluster-sp-repo URL      Git repo for acm-cluster-service-provider (default: ${DEFAULT_ACM_CLUSTER_SP_REPO})
   --acm-cluster-sp-branch REF    Branch to clone (default: ${DEFAULT_ACM_CLUSTER_SP_BRANCH})
   --kubeconfig PATH              Path to kubeconfig file (auto-detected if omitted; mounted into the agent)
@@ -214,6 +216,7 @@ Examples:
   $(basename "$0") --all-service-providers --cluster-api https://api.cluster.example.com --cluster-password secret
   $(basename "$0") --acm-cluster-service-provider --deploy-acm --kubeconfig ~/.kube/config
   $(basename "$0") --deploy-cnv --deploy-acm --kubeconfig ~/.kube/config --cluster-prereqs-only
+  $(basename "$0") --cluster-prereqs-only --agent-embedded-sps container,vm,cluster --kubeconfig ~/.kube/config
   $(basename "$0") --auth-enabled
   $(basename "$0") --tear-down
   $(basename "$0") --running-versions
@@ -1098,8 +1101,21 @@ any_provider_needs_cluster() {
 }
 
 if [[ "${CLUSTER_PREREQS_ONLY}" == true ]]; then
+    # Helm / environment-agent callers can pass --agent-embedded-sps without
+    # repeating --deploy-acm/--deploy-cnv; derive those from embedded tokens.
+    if [[ -n "${AGENT_EMBEDDED_SPS}" ]]; then
+        if agent_embeds vm && [[ "${DEPLOY_CNV}" != true ]]; then
+            DEPLOY_CNV=true
+            info "Auto-enabling --deploy-cnv (embedded SP: vm)"
+        fi
+        if agent_embeds cluster && [[ -z "${DEPLOY_ACM_MCE}" ]]; then
+            DEPLOY_ACM_MCE="acm"
+            info "Auto-enabling --deploy-acm (embedded SP: cluster)"
+        fi
+    fi
     if [[ -z "${DEPLOY_ACM_MCE}" ]] && [[ "${DEPLOY_CNV}" != true ]]; then
         err "--cluster-prereqs-only requires at least one of --deploy-acm, --deploy-mce, or --deploy-cnv"
+        err "(or --agent-embedded-sps including vm and/or cluster)"
         exit 1
     fi
     REQUIRED_TOOLS=(git curl)

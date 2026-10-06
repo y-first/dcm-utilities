@@ -32,10 +32,11 @@ Deploys the full DCM stack for E2E testing by cloning control-plane and running 
 
 **Compose credentials:** After clone, the script copies `deploy/.env.example` to `deploy/.env` when missing and upserts DB/auth keys (lab defaults unless overridden by shell env). Control-plane compose reads these via `env_file: .env`. Pass `--auth-enabled` or set `AUTH_DISABLED=false` to load `deploy/compose.auth.yaml`, add the compose `auth` profile (Keycloak), and write auth credentials into `.env`. The authentication overlay is loaded before user and provider compose overrides so later overrides retain precedence.
 
-**Modes:** The script has three mutually exclusive modes:
+**Modes:** The script has four mutually exclusive modes:
 - **Deploy** (default): full clone + bring-up + health check. Pass `--cleanup-on-failure` to auto-teardown on error (default leaves partial state for debugging).
 - `--running-versions`: query already-running containers, resolve git SHAs via Quay.io API, write `dcm-versions.json`
 - `--tear-down`: stop containers, remove volumes, delete deploy directory
+- `--cluster-prereqs-only`: install ACM/MCE/CNV on the cluster, then exit (no compose stack). Used by Helm CI before `helm upgrade --install`. With `--agent-embedded-sps`, auto-enables `--deploy-cnv` for `vm` and `--deploy-acm` for `cluster` when those flags are not set.
 
 **Version pinning:** Pass `--version <TAG>` to pin all DCM service images to a specific version. Three modes:
 - `--version main` — use `:main` images (the default)
